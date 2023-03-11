@@ -1,6 +1,8 @@
-use std::{convert::TryInto, ops::Deref};
+use std::{convert::TryInto, ops::Deref, sync::Arc};
 
+use async_lock::RwLock;
 use static_assertions::assert_impl_all;
+use zbus_names::InterfaceName;
 use zvariant::ObjectPath;
 
 use crate::{
@@ -151,7 +153,17 @@ impl ObjectServer {
         P: TryInto<ObjectPath<'p>>,
         P::Error: Into<Error>,
     {
-        block_on(self.azync.at(path, iface))
+        let path = path.try_into().map_err(Into::into)?;
+        self.at_internal(path, I::name(), Arc::new(RwLock::new(iface)))
+    }
+
+    fn at_internal<'p>(
+        &self,
+        path: ObjectPath<'p>,
+        name: InterfaceName<'static>,
+        iface: Arc<RwLock<dyn Interface>>,
+    ) -> Result<bool> {
+        block_on(self.azync.at_internal(path, name, iface))
     }
 
     /// Unregister a D-Bus [`Interface`] at a given path.
@@ -166,7 +178,16 @@ impl ObjectServer {
         P: TryInto<ObjectPath<'p>>,
         P::Error: Into<Error>,
     {
-        block_on(self.azync.remove::<I, P>(path))
+        let path = path.try_into().map_err(Into::into)?;
+        self.remove_internal(path, I::name())
+    }
+
+    fn remove_internal<'p>(
+        &self,
+        path: ObjectPath<'p>,
+        name: InterfaceName<'static>,
+    ) -> Result<bool> {
+        block_on(self.azync.remove_internal(path, name))
     }
 
     /// Get the interface at the given path.

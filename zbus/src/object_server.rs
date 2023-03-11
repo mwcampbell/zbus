@@ -185,11 +185,12 @@ impl Node {
             path,
             ..Default::default()
         };
-        node.at(Peer::name(), || Arc::new(RwLock::new(Peer)));
-        node.at(Introspectable::name(), || {
-            Arc::new(RwLock::new(Introspectable))
-        });
-        node.at(Properties::name(), || Arc::new(RwLock::new(Properties)));
+        node.at(Peer::name(), Arc::new(RwLock::new(Peer)));
+        node.at(
+            Introspectable::name(),
+            Arc::new(RwLock::new(Introspectable)),
+        );
+        node.at(Properties::name(), Arc::new(RwLock::new(Properties)));
 
         node
     }
@@ -256,8 +257,8 @@ impl Node {
         self.interfaces.get(&interface_name).cloned()
     }
 
-    fn remove_interface(&mut self, interface_name: InterfaceName<'static>) -> bool {
-        self.interfaces.remove(&interface_name).is_some()
+    fn remove_interface(&mut self, interface_name: &InterfaceName<'static>) -> bool {
+        self.interfaces.remove(interface_name).is_some()
     }
 
     fn is_empty(&self) -> bool {
@@ -275,12 +276,9 @@ impl Node {
 
     // Takes a closure so caller can avoid having to create an Arc & RwLock in case interface was
     // already added.
-    fn at<F>(&mut self, name: InterfaceName<'static>, iface_creator: F) -> bool
-    where
-        F: FnOnce() -> Arc<RwLock<dyn Interface>>,
-    {
+    fn at(&mut self, name: InterfaceName<'static>, iface: Arc<RwLock<dyn Interface>>) -> bool {
         match self.interfaces.entry(name) {
-            Entry::Vacant(e) => e.insert(iface_creator()),
+            Entry::Vacant(e) => e.insert(iface),
             Entry::Occupied(_) => return false,
         };
 
@@ -459,32 +457,22 @@ impl ObjectServer {
         P: TryInto<ObjectPath<'p>>,
         P::Error: Into<Error>,
     {
-        self.at_ready(path, I::name(), move || Arc::new(RwLock::new(iface)))
+        let path = path.try_into().map_err(Into::into)?;
+        self.at_internal(path, I::name(), Arc::new(RwLock::new(iface)))
             .await
     }
 
     /// Same as `at` but expects an interface already in `Arc<RwLock<dyn Interface>>` form.
-    // FIXME: Better name?
-    pub(crate) async fn at_ready<'node, 'p, P, F>(
+    pub(crate) async fn at_internal<'node, 'p>(
         &'node self,
-        path: P,
+        path: ObjectPath<'p>,
         name: InterfaceName<'static>,
-        iface_creator: F,
-    ) -> Result<bool>
-    where
-        // Needs to be hardcoded as 'static instead of 'p like most other
-        // functions, due to https://github.com/rust-lang/rust/issues/63033
-        // (It doesn't matter a whole lot since this is an internal-only API
-        // anyway.)
-        P: TryInto<ObjectPath<'p>>,
-        P::Error: Into<Error>,
-        F: FnOnce() -> Arc<RwLock<dyn Interface + 'static>>,
-    {
-        let path = path.try_into().map_err(Into::into)?;
+        iface: Arc<RwLock<dyn Interface>>,
+    ) -> Result<bool> {
         let mut root = self.root().write().await;
         let (node, manager_path) = root.get_child_mut(&path, true);
         let node = node.unwrap();
-        let added = node.at(name.clone(), iface_creator);
+        let added = node.at(name.clone(), iface);
         if added {
             if name == ObjectManager::name() {
                 // Just added an object manager. Need to signal all managed objects under it.
@@ -531,15 +519,23 @@ impl ObjectServer {
         P::Error: Into<Error>,
     {
         let path = path.try_into().map_err(Into::into)?;
+        self.remove_internal(path, I::name()).await
+    }
+
+    pub(crate) async fn remove_internal<'p>(
+        &self,
+        path: ObjectPath<'p>,
+        name: InterfaceName<'static>,
+    ) -> Result<bool> {
         let mut root = self.root.write().await;
         let (node, manager_path) = root.get_child_mut(&path, false);
         let node = node.ok_or(Error::InterfaceNotFound)?;
-        if !node.remove_interface(I::name()) {
+        if !node.remove_interface(&name) {
             return Err(Error::InterfaceNotFound);
         }
         if let Some(manager_path) = manager_path {
             let ctxt = SignalContext::new(&self.connection(), manager_path.clone())?;
-            ObjectManager::interfaces_removed(&ctxt, &path, &[I::name()]).await?;
+            ObjectManager::interfaces_removed(&ctxt, &path, &[name]).await?;
         }
         if node.is_empty() {
             let mut path_parts = path.rsplit('/').filter(|i| !i.is_empty());
