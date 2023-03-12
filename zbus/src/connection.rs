@@ -428,6 +428,30 @@ impl Connection {
         self.send_message(m).await.map(|_| ())
     }
 
+    #[doc(hidden)]
+    pub fn create_reply<B>(&self, call: &Message, body: B) -> Result<Message>
+    where
+        B: serde::ser::Serialize + zvariant::DynamicType,
+    {
+        Message::method_reply(self.unique_name(), call, &body)
+    }
+
+    #[doc(hidden)]
+    pub fn create_reply_from_result<B, E>(
+        &self,
+        call: &Message,
+        result: std::result::Result<B, E>,
+    ) -> Result<Message>
+    where
+        B: serde::ser::Serialize + zvariant::DynamicType,
+        E: DBusError,
+    {
+        match result {
+            Ok(r) => self.create_reply(call, r),
+            Err(e) => e.create_reply_from_method_call(call),
+        }
+    }
+
     /// Reply to a message.
     ///
     /// Given an existing message (likely a method call), send a reply back to the caller with the

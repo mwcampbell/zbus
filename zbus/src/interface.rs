@@ -7,15 +7,32 @@ use std::{
 };
 
 use async_trait::async_trait;
-use zbus::MessageFlags;
 use zbus_names::{InterfaceName, MemberName};
-use zvariant::{DynamicType, OwnedValue, Value};
+use zvariant::{OwnedValue, Value};
 
 use crate::{fdo, Connection, Message, ObjectServer, Result, SignalContext};
-use tracing::trace;
 
 /// A helper type returned by [`Interface`] callbacks.
-pub enum DispatchResult<'a> {
+pub enum CallResult<'a> {
+    /// This interface does not support the given method
+    NotFound,
+
+    /// Retry with [Interface::call_mut].
+    ///
+    /// This is equivalent to NotFound if returned by call_mut.
+    RequiresMut,
+
+    /// The method was found and will be completed by running this Future
+    /// which returns either a serialized reply or a [`zbus::Error`]
+    Async(Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>>),
+
+    /// The method was completed synchronously with either a serialized reply
+    /// or a [`zbus::Error`]
+    Sync(Result<Message>),
+}
+
+/// A helper type returned by [`Interface`] callbacks.
+pub enum SetResult<'a> {
     /// This interface does not support the given method
     NotFound,
 
@@ -26,35 +43,6 @@ pub enum DispatchResult<'a> {
 
     /// The method was found and will be completed by running this Future
     Async(Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>),
-}
-
-impl<'a> DispatchResult<'a> {
-    /// Helper for creating the Async variant
-    pub fn new_async<F, T, E>(conn: &'a Connection, msg: &'a Message, f: F) -> Self
-    where
-        F: Future<Output = ::std::result::Result<T, E>> + Send + 'a,
-        T: serde::Serialize + DynamicType + Send + Sync,
-        E: zbus::DBusError + Send,
-    {
-        DispatchResult::Async(Box::pin(async move {
-            let hdr = msg.header()?;
-            let ret = f.await;
-            if !hdr
-                .primary()
-                .flags()
-                .contains(MessageFlags::NoReplyExpected)
-            {
-                match ret {
-                    Ok(r) => conn.reply(msg, &r).await,
-                    Err(e) => conn.reply_dbus_error(&hdr, e).await,
-                }
-                .map(|_seq| ())
-            } else {
-                trace!("No reply expected for {:?} by the caller.", msg);
-                Ok(())
-            }
-        }))
-    }
 }
 
 /// The trait used to dispatch messages to an interface instance.
@@ -78,17 +66,17 @@ pub trait Interface: Any + Send + Sync {
 
     /// Set a property value.
     ///
-    /// Return [`DispatchResult::NotFound`] if the property doesn't exist, or
-    /// [`DispatchResult::RequiresMut`] if `set_mut` should be used instead.  The default
+    /// Return [`SetResult::NotFound`] if the property doesn't exist, or
+    /// [`SetResult::RequiresMut`] if `set_mut` should be used instead.  The default
     /// implementation just returns `RequiresMut`.
     fn set<'call>(
         &'call self,
         property_name: &'call str,
         value: &'call Value<'_>,
         ctxt: &'call SignalContext<'_>,
-    ) -> DispatchResult<'call> {
+    ) -> SetResult<'call> {
         let _ = (property_name, value, ctxt);
-        DispatchResult::RequiresMut
+        SetResult::RequiresMut
     }
 
     /// Set a property value.
@@ -105,8 +93,8 @@ pub trait Interface: Any + Send + Sync {
 
     /// Call a method.
     ///
-    /// Return [`DispatchResult::NotFound`] if the method doesn't exist, or
-    /// [`DispatchResult::RequiresMut`] if `call_mut` should be used instead.
+    /// Return [`CallResult::NotFound`] if the method doesn't exist, or
+    /// [`CallResult::RequiresMut`] if `call_mut` should be used instead.
     ///
     /// It is valid, though inefficient, for this to always return `RequiresMut`.
     fn call<'call>(
@@ -115,7 +103,7 @@ pub trait Interface: Any + Send + Sync {
         connection: &'call Connection,
         msg: &'call Message,
         name: MemberName<'call>,
-    ) -> DispatchResult<'call>;
+    ) -> CallResult<'call>;
 
     /// Call a `&mut self` method.
     ///
@@ -126,7 +114,7 @@ pub trait Interface: Any + Send + Sync {
         connection: &'call Connection,
         msg: &'call Message,
         name: MemberName<'call>,
-    ) -> DispatchResult<'call>;
+    ) -> CallResult<'call>;
 
     /// Write introspection XML to the writer, with the given indentation level.
     fn introspect_to_writer(&self, writer: &mut dyn Write, level: usize);

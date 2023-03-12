@@ -192,17 +192,9 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
         clean_input_args(inputs);
 
         let reply = if is_result_output {
-            let ret = quote!(r);
-
-            quote!(match reply {
-                ::std::result::Result::Ok(r) => c.reply(m, &#ret).await,
-                ::std::result::Result::Err(e) => {
-                    let hdr = m.header()?;
-                    c.reply_dbus_error(&hdr, e).await
-                }
-            })
+            quote!(c.create_reply_from_result(m, reply))
         } else {
-            quote!(c.reply(m, &reply).await)
+            quote!(c.create_reply(m, reply))
         };
 
         let member_name = attrs.name.clone().unwrap_or_else(|| {
@@ -320,13 +312,13 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
                     set_mut_dispatch.extend(q);
 
                     let q = quote!(
-                        #member_name => #zbus::DispatchResult::RequiresMut,
+                        #member_name => #zbus::SetResult::RequiresMut,
                     );
                     set_dispatch.extend(q);
                 } else {
                     let q = quote!(
                         #member_name => {
-                            #zbus::DispatchResult::Async(::std::boxed::Box::pin(async move {
+                            #zbus::SetResult::Async(::std::boxed::Box::pin(async move {
                                 #do_set
                             }))
                         }
@@ -424,22 +416,33 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
             introspect.extend(doc_comments);
             introspect.extend(introspect_method(&member_name, &intro_args));
 
-            let m = quote! {
-                #member_name => {
-                    let future = async move {
-                        #args_from_msg
-                        let reply = self.#ident(#args_names)#method_await;
-                        #reply
-                    };
-                    #zbus::DispatchResult::Async(::std::boxed::Box::pin(async move {
-                        future.await.map(|_seq: u32| ())
-                    }))
-                },
+            let m = if is_async {
+                quote! {
+                    #member_name => {
+                        let future = async move {
+                            #args_from_msg
+                            let reply = self.#ident(#args_names).await;
+                            #reply
+                        };
+                        #zbus::CallResult::Async(::std::boxed::Box::pin(future))
+                    },
+                }
+            } else {
+                quote! {
+                    #member_name => {
+                        let mut f = || {
+                            #args_from_msg
+                            let reply = self.#ident(#args_names);
+                            #reply
+                        };
+                        #zbus::CallResult::Sync(f())
+                    },
+                }
             };
 
             if is_mut {
                 call_dispatch.extend(quote! {
-                    #member_name => #zbus::DispatchResult::RequiresMut,
+                    #member_name => #zbus::CallResult::RequiresMut,
                 });
                 call_mut_dispatch.extend(m);
             } else {
@@ -499,10 +502,10 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
                 property_name: &'call str,
                 value: &'call #zbus::zvariant::Value<'_>,
                 signal_context: &'call #zbus::SignalContext<'_>,
-            ) -> #zbus::DispatchResult<'call> {
+            ) -> #zbus::SetResult<'call> {
                 match property_name {
                     #set_dispatch
-                    _ => #zbus::DispatchResult::NotFound,
+                    _ => #zbus::SetResult::NotFound,
                 }
             }
 
@@ -524,10 +527,10 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
                 c: &'call #zbus::Connection,
                 m: &'call #zbus::Message,
                 name: #zbus::names::MemberName<'call>,
-            ) -> #zbus::DispatchResult<'call> {
+            ) -> #zbus::CallResult<'call> {
                 match name.as_str() {
                     #call_dispatch
-                    _ => #zbus::DispatchResult::NotFound,
+                    _ => #zbus::CallResult::NotFound,
                 }
             }
 
@@ -537,10 +540,10 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
                 c: &'call #zbus::Connection,
                 m: &'call #zbus::Message,
                 name: #zbus::names::MemberName<'call>,
-            ) -> #zbus::DispatchResult<'call> {
+            ) -> #zbus::CallResult<'call> {
                 match name.as_str() {
                     #call_mut_dispatch
-                    _ => #zbus::DispatchResult::NotFound,
+                    _ => #zbus::CallResult::NotFound,
                 }
             }
 
@@ -630,9 +633,8 @@ fn get_args_from_inputs(
                             #zbus::SignalContext::new(c, p).expect("Infallible conversion failed")
                         }
                         ::std::option::Option::None => {
-                            let hdr = m.header()?;
                             let err = #zbus::fdo::Error::UnknownObject("Path Required".into());
-                            return c.reply_dbus_error(&hdr, err).await;
+                            return #zbus::DBusError::create_reply_from_method_call(err, m);
                         }
                     };
                 });
@@ -651,15 +653,7 @@ fn get_args_from_inputs(
 
             #signal_context_arg_decl
 
-            let (#(#args_names),*): (#(#tys),*) =
-                match m.body() {
-                    ::std::result::Result::Ok(r) => r,
-                    ::std::result::Result::Err(e) => {
-                        let hdr = m.header()?;
-                        let err = <#zbus::fdo::Error as ::std::convert::From<_>>::from(e);
-                        return c.reply_dbus_error(&hdr, err).await;
-                    }
-                };
+            let (#(#args_names),*): (#(#tys),*) = m.body()?;
         };
 
         let all_args_names = inputs.iter().filter_map(pat_ident);

@@ -8,9 +8,15 @@ use crate::{names::ErrorName, Message, MessageHeader, Result};
 /// [`DBusError` macro][dm].
 ///
 /// [dm]: macro.DBusError.html
-pub trait DBusError {
+pub trait DBusError: Sized {
     /// Generate an error reply message for the given method call.
     fn create_reply(&self, msg: &MessageHeader<'_>) -> Result<Message>;
+
+    #[doc(hidden)]
+    fn create_reply_from_method_call(self, call: &Message) -> Result<Message> {
+        let hdr = call.header()?;
+        self.create_reply(&hdr)
+    }
 
     // The name of the error.
     //

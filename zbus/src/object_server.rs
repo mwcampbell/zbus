@@ -16,7 +16,8 @@ use crate::{
     async_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     fdo,
     fdo::{Introspectable, ManagedObjects, ObjectManager, Peer, Properties},
-    Connection, DispatchResult, Error, Interface, Message, Result, SignalContext, WeakConnection,
+    CallResult, Connection, DBusError, Error, Interface, Message, Result, SignalContext,
+    WeakConnection,
 };
 
 /// Opaque structure that derefs to an `Interface` type.
@@ -626,6 +627,23 @@ impl ObjectServer {
         })
     }
 
+    async fn send_method_reply(
+        &self,
+        connection: &Connection,
+        call: &Message,
+        result: Result<Message>,
+    ) -> Result<()> {
+        let reply = match result {
+            Ok(reply) => reply,
+            Err(e) => {
+                let e = fdo::Error::from(e);
+                e.create_reply_from_method_call(call)?
+            }
+        };
+        connection.send_message(reply).await?;
+        Ok(())
+    }
+
     #[instrument(skip(self, connection))]
     async fn dispatch_method_call_try(
         &self,
@@ -663,25 +681,31 @@ impl ObjectServer {
         let read_lock = iface.read().await;
         trace!("acquired read lock on interface `{}`", iface_name);
         match read_lock.call(self, connection, msg, member.as_ref()) {
-            DispatchResult::NotFound => {
+            CallResult::NotFound => {
                 return Err(fdo::Error::UnknownMethod(format!(
                     "Unknown method '{member}'"
                 )));
             }
-            DispatchResult::Async(f) => {
-                return Ok(f.await);
+            CallResult::Async(f) => {
+                return Ok(self.send_method_reply(connection, msg, f.await).await);
             }
-            DispatchResult::RequiresMut => {}
+            CallResult::Sync(r) => {
+                return Ok(self.send_method_reply(connection, msg, r).await);
+            }
+            CallResult::RequiresMut => {}
         }
         drop(read_lock);
         trace!("acquiring write lock on interface `{}`", iface_name);
         let mut write_lock = iface.write().await;
         trace!("acquired write lock on interface `{}`", iface_name);
         match write_lock.call_mut(self, connection, msg, member.as_ref()) {
-            DispatchResult::NotFound => {}
-            DispatchResult::RequiresMut => {}
-            DispatchResult::Async(f) => {
-                return Ok(f.await);
+            CallResult::NotFound => {}
+            CallResult::RequiresMut => {}
+            CallResult::Async(f) => {
+                return Ok(self.send_method_reply(connection, msg, f.await).await);
+            }
+            CallResult::Sync(r) => {
+                return Ok(self.send_method_reply(connection, msg, r).await);
             }
         }
         drop(write_lock);
