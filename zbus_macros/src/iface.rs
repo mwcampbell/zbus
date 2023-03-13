@@ -312,13 +312,13 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
                     set_mut_dispatch.extend(q);
 
                     let q = quote!(
-                        #member_name => #zbus::SetResult::RequiresMut,
+                        #member_name => #zbus::DispatchResult::RequiresMut,
                     );
                     set_dispatch.extend(q);
                 } else {
                     let q = quote!(
                         #member_name => {
-                            #zbus::SetResult::Async(::std::boxed::Box::pin(async move {
+                            #zbus::DispatchResult::Async(::std::boxed::Box::pin(async move {
                                 #do_set
                             }))
                         }
@@ -419,12 +419,12 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
             let m = if is_async {
                 quote! {
                     #member_name => {
-                        let future = async move {
+                        let future = ::std::boxed::Box::pin(async move {
                             #args_from_msg
                             let reply = self.#ident(#args_names).await;
                             #reply
-                        };
-                        #zbus::CallResult::Async(::std::boxed::Box::pin(future))
+                        });
+                        #zbus::DispatchResult::new_async_from_method(c, m, future)
                     },
                 }
             } else {
@@ -435,14 +435,15 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
                             let reply = self.#ident(#args_names);
                             #reply
                         };
-                        #zbus::CallResult::Sync(f())
+                        let reply = f();
+                        #zbus::DispatchResult::new_async_from_sync_reply(c, m, reply)
                     },
                 }
             };
 
             if is_mut {
                 call_dispatch.extend(quote! {
-                    #member_name => #zbus::CallResult::RequiresMut,
+                    #member_name => #zbus::DispatchResult::RequiresMut,
                 });
                 call_mut_dispatch.extend(m);
             } else {
@@ -502,10 +503,10 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
                 property_name: &'call str,
                 value: &'call #zbus::zvariant::Value<'_>,
                 signal_context: &'call #zbus::SignalContext<'_>,
-            ) -> #zbus::SetResult<'call> {
+            ) -> #zbus::DispatchResult<'call> {
                 match property_name {
                     #set_dispatch
-                    _ => #zbus::SetResult::NotFound,
+                    _ => #zbus::DispatchResult::NotFound,
                 }
             }
 
@@ -527,10 +528,10 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
                 c: &'call #zbus::Connection,
                 m: &'call #zbus::Message,
                 name: #zbus::names::MemberName<'call>,
-            ) -> #zbus::CallResult<'call> {
+            ) -> #zbus::DispatchResult<'call> {
                 match name.as_str() {
                     #call_dispatch
-                    _ => #zbus::CallResult::NotFound,
+                    _ => #zbus::DispatchResult::NotFound,
                 }
             }
 
@@ -540,10 +541,10 @@ pub fn expand(args: AttributeArgs, mut input: ItemImpl) -> syn::Result<TokenStre
                 c: &'call #zbus::Connection,
                 m: &'call #zbus::Message,
                 name: #zbus::names::MemberName<'call>,
-            ) -> #zbus::CallResult<'call> {
+            ) -> #zbus::DispatchResult<'call> {
                 match name.as_str() {
                     #call_mut_dispatch
-                    _ => #zbus::CallResult::NotFound,
+                    _ => #zbus::DispatchResult::NotFound,
                 }
             }
 
@@ -634,7 +635,7 @@ fn get_args_from_inputs(
                         }
                         ::std::option::Option::None => {
                             let err = #zbus::fdo::Error::UnknownObject("Path Required".into());
-                            return #zbus::DBusError::create_reply_from_method_call(err, m);
+                            return #zbus::create_error_reply_from_method_call(err, m);
                         }
                     };
                 });

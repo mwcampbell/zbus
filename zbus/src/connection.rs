@@ -448,8 +448,23 @@ impl Connection {
     {
         match result {
             Ok(r) => self.create_reply(call, r),
-            Err(e) => e.create_reply_from_method_call(call),
+            Err(e) => crate::create_error_reply_from_method_call(e, call),
         }
+    }
+
+    pub(crate) async fn send_method_reply(
+        &self,
+        call: &Message,
+        result: Result<Message>,
+    ) -> Result<()> {
+        let reply = match result {
+            Ok(reply) => reply,
+            Err(e) => {
+                let e = fdo::Error::from(e);
+                crate::create_error_reply_from_method_call(e, call)?
+            }
+        };
+        self.send_message(reply).await.map(|_seq: u32| ())
     }
 
     /// Reply to a message.

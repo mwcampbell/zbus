@@ -159,13 +159,13 @@ impl Properties {
             })?;
 
         match iface.read().await.set(property_name, &value, &ctxt) {
-            zbus::SetResult::RequiresMut => {}
-            zbus::SetResult::NotFound => {
+            zbus::DispatchResult::RequiresMut => {}
+            zbus::DispatchResult::NotFound => {
                 return Err(Error::UnknownProperty(format!(
                     "Unknown property '{property_name}'"
                 )));
             }
-            zbus::SetResult::Async(f) => {
+            zbus::DispatchResult::Async(f) => {
                 return f.await.map_err(Into::into);
             }
         }
